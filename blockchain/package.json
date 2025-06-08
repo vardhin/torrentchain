@@ -1,0 +1,17 @@
+{
+  "name": "ipns-blockchain-api",
+  "version": "1.0.0",
+  "description": "API server for IPNS-Blockchain integration",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "web3": "^1.10.0",
+    "@truffle/contract": "^4.6.0",
+    "@truffle/hdwallet-provider": "^2.1.0",
+    "body-parser": "^1.20.2",
+    "dotenv": "^16.0.3"
+  }
+} 

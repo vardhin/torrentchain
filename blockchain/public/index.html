@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>IPNS Registry with MetaMask</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
+        .connected {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 5px 0;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        input {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .record {
+            background-color: #f8f9fa;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 4px;
+            border-left: 4px solid #28a745;
+        }
+        .record.error {
+            background-color: #fff3f3;
+            border-left: 4px solid #dc3545;
+            color: #dc3545;
+        }
+        #add-status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        #add-status:empty {
+            display: none;
+        }
+        #records-list {
+            margin-top: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>🦊 MetaMask Connection</h2>
+        <div id="wallet-status" class="status disconnected">Not connected to MetaMask</div>
+        <button id="connect-wallet">Connect MetaMask</button>
+    </div>
+
+    <div class="card">
+        <h2>📝 Add New IPNS Record</h2>
+        <input type="text" id="identifier" placeholder="Enter identifier (e.g., file1)">
+        <input type="text" id="ipnsName" placeholder="Enter IPNS name">
+        <button id="add-record" disabled>Add Record</button>
+        <p id="add-status"></p>
+    </div>
+
+    <div class="card">
+        <h2>📚 Stored Records</h2>
+        <button id="refresh-records">Refresh Records</button>
+        <div id="records-list"></div>
+    </div>
+
+    <script>
+        let web3;
+        let contract;
+        let userAccount;
+        let contractAddress;
+
+        // Contract ABI - this will be updated after deployment
+        const contractABI = [
+            {
+                "inputs": [
+                    {
+                        "internalType": "string",
+                        "name": "identifier",
+                        "type": "string"
+                    },
+                    {
+                        "internalType": "string",
+                        "name": "ipnsName",
+                        "type": "string"
+                    }
+                ],
+                "name": "addRecord",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "getAllIdentifiers",
+                "outputs": [
+                    {
+                        "internalType": "string[]",
+                        "name": "",
+                        "type": "string[]"
+                    }
+                ],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [
+                    {
+                        "internalType": "string",
+                        "name": "identifier",
+                        "type": "string"
+                    }
+                ],
+                "name": "getRecord",
+                "outputs": [
+                    {
+                        "internalType": "string",
+                        "name": "ipnsName",
+                        "type": "string"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "timestamp",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "bool",
+                        "name": "exists",
+                        "type": "bool"
+                    }
+                ],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "getRecordCount",
+                "outputs": [
+                    {
+                        "internalType": "uint256",
+                        "name": "",
+                        "type": "uint256"
+                    }
+                ],
+                "stateMutability": "view",
+                "type": "function"
+            }
+        ];
+
+        async function connectWallet() {
+            if (typeof window.ethereum === 'undefined') {
+                alert('Please install MetaMask first!');
+                return;
+            }
+
+            try {
+                // Reset status
+                const statusDiv = document.getElementById('wallet-status');
+                statusDiv.textContent = 'Connecting to MetaMask...';
+                statusDiv.className = 'status';
+
+                // Request account access
+                const accounts = await window.ethereum.request({ 
+                    method: 'eth_requestAccounts' 
+                });
+                
+                if (!accounts || accounts.length === 0) {
+                    throw new Error('No accounts available');
+                }
+
+                userAccount = accounts[0];
+                console.log('Connected account:', userAccount);
+                
+                // Initialize Web3
+                web3 = new Web3(window.ethereum);
+                
+                // Verify network
+                const chainId = await web3.eth.getChainId();
+                console.log('Current chain ID:', chainId);
+                
+                if (chainId !== 1337) {
+                    try {
+                        await window.ethereum.request({
+                            method: 'wallet_switchEthereumChain',
+                            params: [{ chainId: '0x539' }], // 1337 in hex
+                        });
+                    } catch (switchError) {
+                        if (switchError.code === 4902) {
+                            try {
+                                await window.ethereum.request({
+                                    method: 'wallet_addEthereumChain',
+                                    params: [{
+                                        chainId: '0x539',
+                                        chainName: 'Ganache Local',
+                                        nativeCurrency: {
+                                            name: 'ETH',
+                                            symbol: 'ETH',
+                                            decimals: 18
+                                        },
+                                        rpcUrls: ['http://localhost:7545']
+                                    }]
+                                });
+                            } catch (addError) {
+                                throw new Error('Failed to add Ganache network to MetaMask');
+                            }
+                        } else {
+                            throw new Error('Failed to switch to Ganache network');
+                        }
+                    }
+                }
+
+                // Get contract details
+                try {
+                    const response = await fetch('/contract-address');
+                    const data = await response.json();
+                    
+                    if (!data.address) {
+                        throw new Error('Contract address not found');
+                    }
+
+                    console.log('Contract address:', data.address);
+                    
+                    // Initialize contract
+                    contract = new web3.eth.Contract(contractABI, data.address);
+                    
+                    // Verify contract
+                    const code = await web3.eth.getCode(data.address);
+                    if (code === '0x' || code === '0x0') {
+                        throw new Error('No contract code found at the specified address');
+                    }
+                    
+                    // Test contract call
+                    const count = await contract.methods.getRecordCount().call();
+                    console.log('Contract connected successfully. Current record count:', count);
+                    
+                    // Update status
+                    statusDiv.textContent = 'Connected: ' + userAccount;
+                    statusDiv.className = 'status connected';
+                    document.getElementById('add-record').disabled = false;
+                    
+                    await refreshRecords();
+                } catch (error) {
+                    console.error('Contract connection error:', error);
+                    statusDiv.textContent = 'Error: ' + error.message;
+                    statusDiv.className = 'status disconnected';
+                    throw error;
+                }
+            } catch (error) {
+                console.error('Wallet connection error:', error);
+                const statusDiv = document.getElementById('wallet-status');
+                statusDiv.textContent = 'Error: ' + error.message;
+                statusDiv.className = 'status disconnected';
+                document.getElementById('add-record').disabled = true;
+            }
+        }
+
+        async function addRecord() {
+            const identifier = document.getElementById('identifier').value;
+            const ipnsName = document.getElementById('ipnsName').value;
+            const statusElement = document.getElementById('add-status');
+
+            if (!identifier || !ipnsName) {
+                statusElement.textContent = 'Please fill in both fields';
+                return;
+            }
+
+            try {
+                statusElement.textContent = 'Checking connection...';
+                
+                // Debug information
+                console.log('Web3 version:', web3.version);
+                console.log('Is MetaMask:', window.ethereum.isMetaMask);
+                console.log('Selected address:', window.ethereum.selectedAddress);
+                console.log('User account:', userAccount);
+                console.log('Contract address:', contract._address);
+
+                // Request accounts again to ensure connection
+                const accounts = await ethereum.request({ method: 'eth_requestAccounts' });
+                console.log('Available accounts:', accounts);
+
+                if (!accounts || accounts.length === 0) {
+                    throw new Error('No accounts available. Please connect MetaMask.');
+                }
+
+                // Use the current selected account
+                const currentAccount = accounts[0];
+                console.log('Using account:', currentAccount);
+
+                // Get network information
+                const chainId = await web3.eth.getChainId();
+                const networkId = await web3.eth.net.getId();
+                console.log('Chain ID:', chainId);
+                console.log('Network ID:', networkId);
+
+                // Get balance to verify account
+                const balance = await web3.eth.getBalance(currentAccount);
+                console.log('Account balance:', web3.utils.fromWei(balance, 'ether'), 'ETH');
+
+                // Verify contract
+                const code = await web3.eth.getCode(contract._address);
+                console.log('Contract code exists:', code !== '0x');
+
+                statusElement.textContent = 'Preparing transaction...';
+
+                // Create contract method
+                const method = contract.methods.addRecord(identifier, ipnsName);
+
+                // Estimate gas
+                const gasEstimate = await method.estimateGas({ from: currentAccount });
+                console.log('Estimated gas:', gasEstimate);
+
+                // Get gas price
+                const gasPrice = await web3.eth.getGasPrice();
+                console.log('Current gas price:', gasPrice);
+
+                // Send transaction using ethereum.request directly
+                statusElement.textContent = 'Preparing transaction...';
+
+                try {
+                    // First request account access again to ensure MetaMask is unlocked
+                    await ethereum.request({ method: 'eth_requestAccounts' });
+                    
+                    // Prepare transaction data
+                    const data = method.encodeABI();
+                    
+                    // Get nonce
+                    const nonce = await web3.eth.getTransactionCount(currentAccount, 'latest');
+                    console.log('Current nonce:', nonce);
+                    
+                    const transactionParameters = {
+                        nonce: web3.utils.toHex(nonce),
+                        from: currentAccount,
+                        to: contract._address,
+                        gas: web3.utils.toHex(Math.floor(gasEstimate * 1.2)),
+                        gasPrice: web3.utils.toHex(gasPrice),
+                        data: data,
+                        chainId: web3.utils.toHex(1337)
+                    };
+
+                    console.log('Sending transaction parameters:', transactionParameters);
+                    
+                    // Request transaction signature
+                    statusElement.textContent = 'Waiting for MetaMask...';
+                    const txHash = await window.ethereum.request({
+                        method: 'eth_sendTransaction',
+                        params: [transactionParameters],
+                    });
+
+                    if (!txHash) {
+                        throw new Error('No transaction hash received');
+                    }
+
+                    console.log('Transaction hash:', txHash);
+                    statusElement.textContent = 'Transaction sent! Waiting for confirmation...';
+                    
+                    // Wait for transaction receipt
+                    let receipt = null;
+                    while (!receipt) {
+                        try {
+                            receipt = await web3.eth.getTransactionReceipt(txHash);
+                            if (!receipt) {
+                                await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
+                            }
+                        } catch (err) {
+                            console.error('Error checking receipt:', err);
+                            await new Promise(resolve => setTimeout(resolve, 1000));
+                        }
+                    }
+
+                    console.log('Transaction receipt:', receipt);
+                    statusElement.textContent = 'Transaction successful! Hash: ' + txHash;
+
+                    // Clear form
+                    document.getElementById('identifier').value = '';
+                    document.getElementById('ipnsName').value = '';
+
+                    // Refresh records
+                    await refreshRecords();
+                } catch (error) {
+                    console.error('Detailed transaction error:', error);
+                    let errorMessage = 'Transaction failed: ';
+                    
+                    if (error.code === 4001) {
+                        errorMessage = 'Transaction rejected by user';
+                    } else if (error.code === -32002) {
+                        errorMessage = 'MetaMask is already processing a request. Please open MetaMask to continue.';
+                    } else if (error.code === -32603) {
+                        errorMessage = 'Internal JSON-RPC error. Please check your MetaMask connection and network settings.';
+                    } else if (error.message && error.message.includes('insufficient funds')) {
+                        errorMessage = 'Insufficient funds for gas * price + value';
+                    } else {
+                        errorMessage += error.message || 'Unknown error';
+                    }
+                    
+                    statusElement.textContent = errorMessage;
+                    console.error('Error details:', error);
+                    throw error;
+                }
+
+            } catch (error) {
+                console.error('Detailed error:', error);
+                let errorMessage = 'Failed to add record: ';
+                
+                if (error.code === 4001) {
+                    errorMessage += 'Transaction rejected by user';
+                } else if (error.code === -32002) {
+                    errorMessage += 'MetaMask is already processing a request. Please check MetaMask.';
+                } else if (error.code === -32603) {
+                    errorMessage += 'Internal JSON-RPC error. Please check your MetaMask connection.';
+                } else if (error.message.includes('insufficient funds')) {
+                    errorMessage += 'Insufficient funds for gas * price + value';
+                } else {
+                    errorMessage += error.message || 'Unknown error';
+                }
+                
+                statusElement.textContent = errorMessage;
+                console.error('Error details:', error);
+            }
+        }
+
+        async function refreshRecords() {
+            if (!contract) {
+                console.error('Contract not initialized');
+                document.getElementById('records-list').innerHTML = 'Error: Please connect your wallet first';
+                return;
+            }
+
+            const recordsList = document.getElementById('records-list');
+            recordsList.innerHTML = 'Loading records...';
+
+            try {
+                console.log('Fetching identifiers...');
+                const identifiers = await contract.methods.getAllIdentifiers().call();
+                console.log('Got identifiers:', identifiers);
+
+                if (!Array.isArray(identifiers)) {
+                    throw new Error('Invalid response from getAllIdentifiers: ' + JSON.stringify(identifiers));
+                }
+
+                if (identifiers.length === 0) {
+                    recordsList.innerHTML = 'No records found';
+                    return;
+                }
+
+                recordsList.innerHTML = '';
+                for (const identifier of identifiers) {
+                    console.log('Fetching record for identifier:', identifier);
+                    try {
+                        const record = await contract.methods.getRecord(identifier).call();
+                        console.log('Got record:', record);
+                        
+                        if (!record) {
+                            throw new Error('No record returned');
+                        }
+
+                        const recordDiv = document.createElement('div');
+                        recordDiv.className = 'record';
+                        recordDiv.innerHTML = `
+                            <strong>Identifier:</strong> ${identifier}<br>
+                            <strong>IPNS Name:</strong> ${record[0]}<br>
+                            <strong>Added:</strong> ${new Date(Number(record[1]) * 1000).toLocaleString()}<br>
+                            <strong>Exists:</strong> ${record[2]}
+                        `;
+                        recordsList.appendChild(recordDiv);
+                    } catch (recordError) {
+                        console.error('Error fetching individual record:', recordError);
+                        const errorDiv = document.createElement('div');
+                        errorDiv.className = 'record error';
+                        errorDiv.innerHTML = `<strong>Error loading record for ${identifier}:</strong> ${recordError.message}`;
+                        recordsList.appendChild(errorDiv);
+                    }
+                }
+            } catch (error) {
+                console.error('Error in refreshRecords:', error);
+                recordsList.innerHTML = `Error loading records: ${error.message}`;
+            }
+        }
+
+        // Event Listeners
+        document.getElementById('connect-wallet').addEventListener('click', connectWallet);
+        document.getElementById('add-record').addEventListener('click', addRecord);
+        document.getElementById('refresh-records').addEventListener('click', refreshRecords);
+
+        // Check if already connected
+        if (typeof window.ethereum !== 'undefined') {
+            ethereum.request({ method: 'eth_accounts' })
+                .then(accounts => {
+                    if (accounts.length > 0) {
+                        connectWallet();
+                    }
+                });
+        }
+
+        // Add event listener for MetaMask account changes
+        if (window.ethereum) {
+            window.ethereum.on('accountsChanged', function (accounts) {
+                console.log('MetaMask account changed:', accounts[0]);
+                if (accounts.length > 0) {
+                    userAccount = accounts[0];
+                    document.getElementById('wallet-status').textContent = 'Connected: ' + userAccount;
+                    document.getElementById('wallet-status').className = 'status connected';
+                } else {
+                    document.getElementById('wallet-status').textContent = 'Not connected to MetaMask';
+                    document.getElementById('wallet-status').className = 'status disconnected';
+                }
+            });
+
+            window.ethereum.on('chainChanged', function (chainId) {
+                console.log('MetaMask chain changed:', chainId);
+                window.location.reload();
+            });
+        }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/web3@1.5.2/dist/web3.min.js"></script>
+</body>
+</html> 
