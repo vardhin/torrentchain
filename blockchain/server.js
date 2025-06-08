@@ -30,10 +30,10 @@ app.get('/contract-address', async (req, res) => {
     }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001; // Changed from 3000 to 3001
 app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Blockchain server running on http://localhost:${PORT}`);
     console.log('1. Make sure Ganache is running on port 7545');
     console.log('2. Make sure you have MetaMask installed');
     console.log('3. Connect MetaMask to Ganache (http://localhost:7545)');
-}); 
+});
