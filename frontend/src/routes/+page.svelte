@@ -22,13 +22,20 @@
         MoreVertical,
         AlertCircle,
         Info,
-        Loader2
+        Loader2,
+        Activity,
+        Users,
+        Zap,
+        HardDrive,
+        RefreshCw,
+        Tag
     } from 'lucide-svelte';
 
     // Stores
     const tables = writable([]);
     const services = writable({});
     const contractAddress = writable('');
+    const activeTorrents = writable([]);
     
     // Component state
     let activeTab = 'torrent';
@@ -39,6 +46,7 @@
     let selectedFile = null;
     let torrentResult = null;
     let dragOver = false;
+    let torrentName = ''; // New field for torrent name
     
     // Enhanced table management state
     let newTable = { name: '', description: '', data: '' };
@@ -50,6 +58,11 @@
     let sortBy = 'name';
     let sortOrder = 'asc';
     let viewMode = 'grid'; // 'grid' or 'list'
+
+    // Active torrents state
+    let torrentsLoading = false;
+    let autoRefresh = false;
+    let refreshInterval;
 
     const API_BASE = 'http://localhost:3000';
 
@@ -64,6 +77,17 @@
         if (bytes === 0) return '0 Bytes';
         const i = Math.floor(Math.log(bytes) / Math.log(1024));
         return Math.round(bytes / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i];
+    }
+
+    function formatSpeed(bytesPerSecond) {
+        if (bytesPerSecond === 0) return '0 B/s';
+        const sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+        const i = Math.floor(Math.log(bytesPerSecond) / Math.log(1024));
+        return Math.round(bytesPerSecond / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i];
+    }
+
+    function formatProgress(progress) {
+        return (progress * 100).toFixed(1) + '%';
     }
 
     // API functions
@@ -112,7 +136,20 @@
                     }
                 }
                 
-                tables.set(tablesArray);
+                // Normalize table objects to ensure required properties exist
+                const normalizedTables = tablesArray.map(table => ({
+                    id: table.id || table.name || 'unknown',
+                    name: table.name || 'Untitled',
+                    description: table.description || (table.status ? `Status: ${table.status}` : 'No description available'),
+                    data: table.data || '',
+                    createdAt: table.createdAt || table.created_at || new Date().toISOString(),
+                    status: table.status || 'unknown',
+                    ipns_name: table.ipns_name || null,
+                    // Add any other properties from the original table
+                    ...table
+                }));
+                
+                tables.set(normalizedTables);
             } else {
                 console.error('Failed to fetch tables, status:', response.status);
                 showNotification('Failed to fetch tables', 'error');
@@ -125,9 +162,53 @@
         }
     }
 
+    async function fetchActiveTorrents() {
+        try {
+            torrentsLoading = true;
+            const response = await fetch(`${API_BASE}/torrents/active`);
+            
+            if (response.ok) {
+                const data = await response.json();
+                activeTorrents.set(data.torrents || []);
+            } else {
+                console.error('Failed to fetch active torrents, status:', response.status);
+                showNotification('Failed to fetch active torrents', 'error');
+            }
+        } catch (error) {
+            console.error('Failed to fetch active torrents:', error);
+            showNotification('Error fetching torrents', 'error');
+        } finally {
+            torrentsLoading = false;
+        }
+    }
+
+    function toggleAutoRefresh() {
+        autoRefresh = !autoRefresh;
+        
+        if (autoRefresh) {
+            refreshInterval = setInterval(() => {
+                if (activeTab === 'torrents') {
+                    fetchActiveTorrents();
+                }
+            }, 5000); // Refresh every 5 seconds
+            showNotification('Auto-refresh enabled', 'info');
+        } else {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+                refreshInterval = null;
+            }
+            showNotification('Auto-refresh disabled', 'info');
+        }
+    }
+
     async function createTorrent() {
         if (!selectedFile) {
             showNotification('Please select a file first', 'warning');
+            return;
+        }
+
+        if (!torrentName.trim()) {
+            showNotification('Please enter a torrent name', 'warning');
             return;
         }
 
@@ -135,8 +216,9 @@
             loading = true;
             const formData = new FormData();
             formData.append('file', selectedFile);
+            formData.append('torrentName', torrentName.trim());
 
-            const response = await fetch(`${API_BASE}/create-torrent`, {
+            const response = await fetch(`${API_BASE}/create-torrent-with-versioning`, {
                 method: 'POST',
                 body: formData
             });
@@ -144,7 +226,16 @@
             if (response.ok) {
                 const data = await response.json();
                 torrentResult = data;
-                showNotification('Torrent created successfully!', 'success');
+                
+                showNotification(data.message, 'success');
+                
+                // Refresh tables to show the updated data
+                await fetchTables();
+                
+                // Refresh active torrents if on that tab
+                if (activeTab === 'torrents') {
+                    setTimeout(() => fetchActiveTorrents(), 1000);
+                }
             } else {
                 const error = await response.json();
                 showNotification(error.error || 'Failed to create torrent', 'error');
@@ -155,6 +246,13 @@
         } finally {
             loading = false;
         }
+    }
+
+    // Reset form function
+    function resetTorrentForm() {
+        selectedFile = null;
+        torrentName = '';
+        torrentResult = null;
     }
 
     async function createTable() {
@@ -280,9 +378,41 @@
         }
     });
 
-    function viewTable(table) {
-        viewingTable = table;
-        showViewModal = true;
+    async function fetchTableDetails(tableId) {
+        try {
+            const response = await fetch(`${API_BASE}/ipfs/tables/${tableId}`);
+            
+            if (response.ok) {
+                const tableData = await response.json();
+                return {
+                    id: tableData.id || tableId,
+                    name: tableData.name || 'Untitled',
+                    description: tableData.description || 'No description available',
+                    data: tableData.data || tableData.contents || '',
+                    createdAt: tableData.createdAt || tableData.created_at || new Date().toISOString(),
+                    status: tableData.status || 'unknown',
+                    ipns_name: tableData.ipns_name || null,
+                    hash: tableData.hash || null,
+                    ...tableData
+                };
+            } else {
+                throw new Error(`Failed to fetch table details: ${response.status}`);
+            }
+        } catch (error) {
+            console.error('Failed to fetch table details:', error);
+            return null;
+        }
+    }
+
+    // Update the viewTable function to fetch full details
+    async function viewTable(table) {
+        const fullTableData = await fetchTableDetails(table.id);
+        if (fullTableData) {
+            viewingTable = fullTableData;
+            showViewModal = true;
+        } else {
+            showNotification('Failed to load table details', 'error');
+        }
     }
 
     function duplicateTable(table) {
@@ -320,11 +450,21 @@
     }
 
     function getTableSummary(table) {
-        if (!table.data) return 'No data';
+        if (!table.data) {
+            // If no data but has status, show status info
+            if (table.status) {
+                return `Status: ${table.status}`;
+            }
+            return 'No data';
+        }
         
         try {
             const data = JSON.parse(table.data);
             if (Array.isArray(data)) {
+                // Check if it's a torrent versions table
+                if (data.length > 0 && data[0].hash && data[0].version) {
+                    return `${data.length} version${data.length === 1 ? '' : 's'}`;
+                }
                 return `${data.length} items`;
             } else if (typeof data === 'object') {
                 return `${Object.keys(data).length} properties`;
@@ -335,11 +475,32 @@
         }
     }
 
+    function isTorrentTable(table) {
+        try {
+            const data = JSON.parse(table.data || '[]');
+            return Array.isArray(data) && data.length > 0 && data[0].hash && data[0].version;
+        } catch {
+            return false;
+        }
+    }
+
+    // Watch for tab changes to load appropriate data
+    $: if (activeTab === 'torrents') {
+        fetchActiveTorrents();
+    }
+
     // Initialize
     onMount(() => {
         checkHealth();
         fetchContractAddress();
         fetchTables();
+        
+        // Cleanup interval on unmount
+        return () => {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+        };
     });
 </script>
 
@@ -377,6 +538,12 @@
                     Create Torrent
                 </button>
                 <button 
+                    class="tab-button {activeTab === 'torrents' ? 'active' : ''}"
+                    on:click={() => activeTab = 'torrents'}
+                >
+                    Active Torrents
+                </button>
+                <button 
                     class="tab-button {activeTab === 'tables' ? 'active' : ''}"
                     on:click={() => activeTab = 'tables'}
                 >
@@ -399,10 +566,30 @@
             <div class="section-card">
                 <div class="section-header">
                     <h2 class="section-title">Create Torrent</h2>
-                    <p class="section-description">Upload a file to create and seed a torrent</p>
+                    <p class="section-description">Upload a file and create a versioned torrent entry</p>
                 </div>
                 
                 <div class="section-content">
+                    <!-- Torrent Name Input -->
+                    <div class="form-group">
+                        <label for="torrent-name" class="form-label">
+                            <Tag class="label-icon" size={16} />
+                            Torrent Name
+                        </label>
+                        <input 
+                            id="torrent-name"
+                            type="text" 
+                            bind:value={torrentName}
+                            class="form-input"
+                            placeholder="Enter torrent name (e.g., MyProject, Documentation, etc.)"
+                            disabled={loading}
+                        >
+                        <p class="form-help">
+                            This name will be used to group torrent versions. If a torrent with this name exists, 
+                            a new version will be created.
+                        </p>
+                    </div>
+
                     <!-- File Upload Area -->
                     <div 
                         class="file-upload-area {dragOver ? 'drag-over' : ''} {selectedFile ? 'file-selected' : ''}"
@@ -424,7 +611,7 @@
                                 <div class="upload-text">
                                     <label for="file-upload" class="upload-label">
                                         <span>Upload a file</span>
-                                        <input id="file-upload" name="file-upload" type="file" class="file-input" on:change={handleFileSelect}>
+                                        <input id="file-upload" name="file-upload" type="file" class="file-input" on:change={handleFileSelect} disabled={loading}>
                                     </label>
                                     <p>or drag and drop</p>
                                 </div>
@@ -436,7 +623,7 @@
                     <div class="button-section">
                         <button 
                             on:click={createTorrent}
-                            disabled={!selectedFile || loading}
+                            disabled={!selectedFile || !torrentName.trim() || loading}
                             class="primary-button {loading ? 'loading' : ''}"
                         >
                             {#if loading}
@@ -446,6 +633,16 @@
                                 Create Torrent
                             {/if}
                         </button>
+                        
+                        {#if selectedFile || torrentName || torrentResult}
+                            <button 
+                                on:click={resetTorrentForm}
+                                disabled={loading}
+                                class="secondary-button"
+                            >
+                                Reset
+                            </button>
+                        {/if}
                     </div>
 
                     <!-- Torrent Result -->
@@ -458,7 +655,9 @@
                                 <div class="result-details">
                                     <h3 class="result-title">Torrent Created Successfully!</h3>
                                     <div class="result-info">
+                                        <p><strong>Torrent Name:</strong> {torrentName}</p>
                                         <p><strong>File:</strong> {torrentResult.originalName}</p>
+                                        <p><strong>Hash:</strong> <code>{torrentResult.infoHash}</code></p>
                                         <p class="magnet-label"><strong>Magnet Link:</strong></p>
                                         <div class="magnet-link">
                                             {torrentResult.magnetLink}
@@ -478,13 +677,178 @@
                 </div>
             </div>
 
+        {:else if activeTab === 'torrents'}
+            <!-- Active Torrents Section -->
+            <div class="section-card">
+                <div class="section-header with-button">
+                    <div class="header-text">
+                        <h2 class="section-title">Active Torrents</h2>
+                        <p class="section-description">Monitor your seeding torrents</p>
+                    </div>
+                    <div class="header-actions">
+                        <button 
+                            on:click={toggleAutoRefresh}
+                            class="secondary-button {autoRefresh ? 'active' : ''}"
+                            title="Toggle auto-refresh"
+                        >
+                            <Activity class="button-icon {autoRefresh ? 'spinning' : ''}" size={16} />
+                            Auto Refresh {autoRefresh ? 'On' : 'Off'}
+                        </button>
+                        <button 
+                            on:click={fetchActiveTorrents}
+                            disabled={torrentsLoading}
+                            class="secondary-button"
+                        >
+                            <RefreshCw class="button-icon {torrentsLoading ? 'spinning' : ''}" size={16} />
+                            Refresh
+                        </button>
+                    </div>
+                </div>
+
+                <div class="section-content">
+                    {#if torrentsLoading}
+                        <div class="loading-container">
+                            <Loader2 class="loading-spinner large" size={48} />
+                        </div>
+                    {:else if $activeTorrents.length === 0}
+                        <div class="empty-state">
+                            <Activity class="empty-icon" size={48} />
+                            <h3 class="empty-title">No Active Torrents</h3>
+                            <p class="empty-description">Create a torrent to start seeding files.</p>
+                            <button 
+                                on:click={() => activeTab = 'torrent'}
+                                class="primary-button"
+                            >
+                                Create Your First Torrent
+                            </button>
+                        </div>
+                    {:else}
+                        <!-- Torrents Summary -->
+                        <div class="torrents-summary">
+                            <div class="summary-stats">
+                                <div class="stat-item">
+                                    <div class="stat-icon">
+                                        <Activity class="icon" size={20} />
+                                    </div>
+                                    <div class="stat-content">
+                                        <span class="stat-value">{$activeTorrents.length}</span>
+                                        <span class="stat-label">Active Torrents</span>
+                                    </div>
+                                </div>
+                                <div class="stat-item">
+                                    <div class="stat-icon">
+                                        <Users class="icon" size={20} />
+                                    </div>
+                                    <div class="stat-content">
+                                        <span class="stat-value">{$activeTorrents.reduce((sum, t) => sum + t.numPeers, 0)}</span>
+                                        <span class="stat-label">Total Peers</span>
+                                    </div>
+                                </div>
+                                <div class="stat-item">
+                                    <div class="stat-icon">
+                                        <Zap class="icon" size={20} />
+                                    </div>
+                                    <div class="stat-content">
+                                        <span class="stat-value">{formatSpeed($activeTorrents.reduce((sum, t) => sum + t.uploadSpeed, 0))}</span>
+                                        <span class="stat-label">Total Upload Speed</span>
+                                    </div>
+                                </div>
+                                <div class="stat-item">
+                                    <div class="stat-icon">
+                                        <HardDrive class="icon" size={20} />
+                                    </div>
+                                    <div class="stat-content">
+                                        <span class="stat-value">{formatFileSize($activeTorrents.reduce((sum, t) => sum + t.uploaded, 0))}</span>
+                                        <span class="stat-label">Total Uploaded</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Torrents List -->
+                        <div class="torrents-list">
+                            {#each $activeTorrents as torrent}
+                                <div class="torrent-card">
+                                    <div class="torrent-header">
+                                        <div class="torrent-info">
+                                            <h3 class="torrent-name">{torrent.name || 'Unknown'}</h3>
+                                            <div class="torrent-hash">
+                                                <span class="hash-label">Hash:</span>
+                                                <code class="hash-value">{torrent.infoHash}</code>
+                                                <button 
+                                                    class="copy-hash-button"
+                                                    on:click={() => navigator.clipboard.writeText(torrent.infoHash)}
+                                                    title="Copy hash"
+                                                >
+                                                    <Copy size={14} />
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div class="torrent-status">
+                                            <span class="status-badge seeding">Seeding</span>
+                                        </div>
+                                    </div>
+
+                                    <div class="torrent-progress">
+                                        <div class="progress-bar">
+                                            <div 
+                                                class="progress-fill" 
+                                                style="width: {formatProgress(torrent.progress)}"
+                                            ></div>
+                                        </div>
+                                        <span class="progress-text">{formatProgress(torrent.progress)}</span>
+                                    </div>
+
+                                    <div class="torrent-stats">
+                                        <div class="stat-group">
+                                            <div class="stat">
+                                                <span class="stat-label">Peers</span>
+                                                <span class="stat-value">{torrent.numPeers}</span>
+                                            </div>
+                                            <div class="stat">
+                                                <span class="stat-label">Download Speed</span>
+                                                <span class="stat-value">{formatSpeed(torrent.downloadSpeed)}</span>
+                                            </div>
+                                            <div class="stat">
+                                                <span class="stat-label">Upload Speed</span>
+                                                <span class="stat-value">{formatSpeed(torrent.uploadSpeed)}</span>
+                                            </div>
+                                        </div>
+                                        <div class="stat-group">
+                                            <div class="stat">
+                                                <span class="stat-label">Downloaded</span>
+                                                <span class="stat-value">{formatFileSize(torrent.downloaded)}</span>
+                                            </div>
+                                            <div class="stat">
+                                                <span class="stat-label">Uploaded</span>
+                                                <span class="stat-value">{formatFileSize(torrent.uploaded)}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="torrent-actions">
+                                        <button 
+                                            class="action-button secondary"
+                                            on:click={() => navigator.clipboard.writeText(torrent.magnetURI)}
+                                        >
+                                            <Copy size={16} />
+                                            Copy Magnet Link
+                                        </button>
+                                    </div>
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
+                </div>
+            </div>
+
         {:else if activeTab === 'tables'}
             <!-- Enhanced IPFS Tables Section -->
             <div class="section-card">
                 <div class="section-header with-button">
                     <div class="header-text">
                         <h2 class="section-title">IPFS Tables</h2>
-                        <p class="section-description">Manage your decentralized data tables</p>
+                        <p class="section-description">Manage your decentralized data tables and torrent versions</p>
                     </div>
                     <button 
                         on:click={() => showCreateModal = true}
@@ -585,13 +949,21 @@
                             {:else}
                                 <Upload class="empty-icon" size={48} />
                                 <h3 class="empty-title">No tables</h3>
-                                <p class="empty-description">Get started by creating your first table.</p>
-                                <button 
-                                    on:click={() => showCreateModal = true}
-                                    class="primary-button"
-                                >
-                                    Create Your First Table
-                                </button>
+                                <p class="empty-description">Get started by creating your first table or torrent.</p>
+                                <div class="empty-actions">
+                                    <button 
+                                        on:click={() => activeTab = 'torrent'}
+                                        class="primary-button"
+                                    >
+                                        Create Your First Torrent
+                                    </button>
+                                    <button 
+                                        on:click={() => showCreateModal = true}
+                                        class="secondary-button"
+                                    >
+                                        Create Table
+                                    </button>
+                                </div>
                             {/if}
                         </div>
                     {:else}
@@ -600,9 +972,17 @@
                             {#if viewMode === 'grid'}
                                 <div class="tables-grid">
                                     {#each filteredTables as table}
-                                        <div class="table-card">
+                                        <div class="table-card {isTorrentTable(table) ? 'torrent-table' : ''}">
                                             <div class="table-card-header">
-                                                <h3 class="table-name">{table.name}</h3>
+                                                <div class="table-title-section">
+                                                    <h3 class="table-name">{table.name}</h3>
+                                                    {#if isTorrentTable(table)}
+                                                        <span class="table-type-badge torrent">
+                                                            <Tag class="badge-icon" size={12} />
+                                                            Torrent
+                                                        </span>
+                                                    {/if}
+                                                </div>
                                                 <div class="table-menu">
                                                     <button class="menu-trigger" title="More options">
                                                         <MoreVertical class="menu-icon" size={16} />
@@ -657,10 +1037,18 @@
                             {:else}
                                 <div class="tables-list">
                                     {#each filteredTables as table}
-                                        <div class="table-list-item">
+                                        <div class="table-list-item {isTorrentTable(table) ? 'torrent-table' : ''}">
                                             <div class="table-list-content">
                                                 <div class="table-list-main">
-                                                    <h3 class="table-list-name">{table.name}</h3>
+                                                    <div class="table-list-title">
+                                                        <h3 class="table-list-name">{table.name}</h3>
+                                                        {#if isTorrentTable(table)}
+                                                            <span class="table-type-badge torrent">
+                                                                <Tag class="badge-icon" size={12} />
+                                                                Torrent
+                                                            </span>
+                                                        {/if}
+                                                    </div>
                                                     <p class="table-list-description">{table.description}</p>
                                                 </div>
                                                 <div class="table-list-meta">
@@ -868,7 +1256,15 @@
             ></div>
             <div class="modal-content large" on:click|stopPropagation style="position: relative; z-index: 52;">
                 <div class="modal-header">
-                    <h3 class="modal-title">{viewingTable.name}</h3>
+                    <div class="modal-title-section">
+                        <h3 class="modal-title">{viewingTable.name}</h3>
+                        {#if isTorrentTable(viewingTable)}
+                            <span class="table-type-badge torrent">
+                                <Tag class="badge-icon" size={12} />
+                                Torrent Versions
+                            </span>
+                        {/if}
+                    </div>
                     <button 
                         on:click={() => showViewModal = false}
                         class="modal-close"
@@ -904,9 +1300,44 @@
                         </div>
                         {#if viewingTable.data}
                             <div class="detail-section">
-                                <h4 class="detail-title">Data</h4>
+                                <h4 class="detail-title">
+                                    {isTorrentTable(viewingTable) ? 'Torrent Versions' : 'Data'}
+                                </h4>
                                 <div class="data-viewer">
-                                    <pre class="data-content">{viewingTable.data}</pre>
+                                    {#if isTorrentTable(viewingTable)}
+                                        <!-- Special rendering for torrent versions -->
+                                        {#each JSON.parse(viewingTable.data) as version, index}
+                                            <div class="version-item">
+                                                <div class="version-header">
+                                                    <h5 class="version-title">Version {version.version}</h5>
+                                                    <span class="version-date">{formatDate(version.createdAt)}</span>
+                                                </div>
+                                                <div class="version-details">
+                                                    <p><strong>File:</strong> {version.fileName}</p>
+                                                    <p><strong>Size:</strong> {formatFileSize(version.fileSize)}</p>
+                                                    <p><strong>Hash:</strong> <code>{version.hash}</code></p>
+                                                    <div class="version-actions">
+                                                        <button 
+                                                            class="copy-button small"
+                                                            on:click={() => navigator.clipboard.writeText(version.magnetLink)}
+                                                        >
+                                                            <Copy size={14} />
+                                                            Copy Magnet Link
+                                                        </button>
+                                                        <button 
+                                                            class="copy-button small"
+                                                            on:click={() => navigator.clipboard.writeText(version.hash)}
+                                                        >
+                                                            <Copy size={14} />
+                                                            Copy Hash
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        {/each}
+                                    {:else}
+                                        <pre class="data-content">{viewingTable.data}</pre>
+                                    {/if}
                                 </div>
                             </div>
                         {/if}
@@ -966,4 +1397,3 @@
         </div>
     {/if}
 </main>
-

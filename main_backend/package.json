@@ -8,5 +8,11 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": ""
+  "description": "",
+  "dependencies": {
+    "create-torrent": "^6.1.0",
+    "express": "^5.1.0",
+    "multer": "^2.0.1",
+    "webtorrent": "^2.6.8"
+  }
 }
