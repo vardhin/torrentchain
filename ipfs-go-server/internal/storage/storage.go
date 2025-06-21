@@ -249,6 +249,11 @@ func (s *Storage) LoadTable() error {
 	}
 	defer resolved.Close()
 
+	// Add nil check for resolved.Output
+	if resolved.Output == nil {
+		return fmt.Errorf("IPNS resolution returned nil output for %s", s.ipnsName)
+	}
+
 	var resolveResp struct {
 		Path string `json:"Path"`
 	}

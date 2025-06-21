@@ -28,7 +28,11 @@
         Zap,
         HardDrive,
         RefreshCw,
-        Tag
+        Tag,
+        Send,
+        Wallet,
+        Clock,
+        TrendingUp
     } from 'lucide-svelte';
 
     // Stores
@@ -36,6 +40,8 @@
     const services = writable({});
     const contractAddress = writable('');
     const activeTorrents = writable([]);
+    const accounts = writable([]);
+    const transactions = writable([]);
     
     // Component state
     let activeTab = 'torrent';
@@ -46,7 +52,7 @@
     let selectedFile = null;
     let torrentResult = null;
     let dragOver = false;
-    let torrentName = ''; // New field for torrent name
+    let torrentName = '';
     
     // Enhanced table management state
     let newTable = { name: '', description: '', data: '' };
@@ -57,14 +63,31 @@
     let searchQuery = '';
     let sortBy = 'name';
     let sortOrder = 'asc';
-    let viewMode = 'grid'; // 'grid' or 'list'
+    let viewMode = 'grid';
 
     // Active torrents state
     let torrentsLoading = false;
     let autoRefresh = false;
     let refreshInterval;
 
+    // Blockchain transaction state
+    let showTransactionModal = false;
+    let transactionForm = {
+        fromAccount: '',
+        toAccount: '',
+        amount: '',
+        reason: 'torrent_seeding',
+        torrentInfo: {
+            fileName: '',
+            fileSize: '',
+            seedingDuration: ''
+        }
+    };
+    let transactionLoading = false;
+    let selectedAccount = '';
+
     const API_BASE = 'http://localhost:3000';
+    const BLOCKCHAIN_API = 'http://localhost:3001';
 
     // Utility functions
     function showNotification(message, type = 'info') {
@@ -93,16 +116,51 @@
     // API functions
     async function checkHealth() {
         try {
+            // Check main API health
             const response = await fetch(`${API_BASE}/health`);
             const data = await response.json();
-            services.set(data.services);
+            
+            // Check blockchain server health
+            try {
+                const blockchainResponse = await fetch(`${BLOCKCHAIN_API}/health`);
+                const blockchainData = await blockchainResponse.json();
+                
+                // Combine both service statuses
+                services.set({
+                    ...data.services,
+                    blockchainServer: blockchainResponse.ok ? 'connected' : 'disconnected'
+                });
+            } catch (blockchainError) {
+                console.error('Blockchain health check failed:', blockchainError);
+                services.set({
+                    ...data.services,
+                    blockchainServer: 'disconnected'
+                });
+            }
         } catch (error) {
             console.error('Health check failed:', error);
             showNotification('Failed to check service health', 'error');
+            // Set default disconnected state
+            services.set({
+                blockchainServer: 'disconnected'
+            });
         }
     }
 
     async function fetchContractAddress() {
+        try {
+            // Try blockchain server first (direct)
+            const response = await fetch(`${BLOCKCHAIN_API}/contract-address`);
+            if (response.ok) {
+                const data = await response.json();
+                contractAddress.set(data.address || 'Not available');
+                return;
+            }
+        } catch (error) {
+            console.error('Failed to fetch contract address from blockchain server:', error);
+        }
+        
+        // Fallback to main API server
         try {
             const response = await fetch(`${API_BASE}/blockchain/contract-address`);
             if (response.ok) {
@@ -110,7 +168,8 @@
                 contractAddress.set(data.address || 'Not available');
             }
         } catch (error) {
-            console.error('Failed to fetch contract address:', error);
+            console.error('Failed to fetch contract address from main server:', error);
+            contractAddress.set('Connection failed');
         }
     }
 
@@ -484,9 +543,144 @@
         }
     }
 
+    // Blockchain functions
+    async function fetchAccounts() {
+        try {
+            const response = await fetch(`${BLOCKCHAIN_API}/accounts`);
+            if (response.ok) {
+                const data = await response.json();
+                accounts.set(data.accounts || []);
+                if (data.accounts && data.accounts.length > 0 && !selectedAccount) {
+                    selectedAccount = data.accounts[0].address;
+                    transactionForm.fromAccount = data.accounts[0].address;
+                }
+            }
+        } catch (error) {
+            console.error('Failed to fetch accounts:', error);
+            showNotification('Failed to fetch accounts', 'error');
+        }
+    }
+
+    async function fetchTransactions() {
+        if (!selectedAccount) return;
+        
+        try {
+            const response = await fetch(`${BLOCKCHAIN_API}/transactions/${selectedAccount}`);
+            if (response.ok) {
+                const data = await response.json();
+                transactions.set(data.transactions || []);
+            }
+        } catch (error) {
+            console.error('Failed to fetch transactions:', error);
+        }
+    }
+
+    async function sendTransaction() {
+        if (!transactionForm.fromAccount || !transactionForm.toAccount || !transactionForm.amount) {
+            showNotification('Please fill in all required fields', 'warning');
+            return;
+        }
+
+        if (transactionForm.fromAccount === transactionForm.toAccount) {
+            showNotification('Cannot send transaction to the same account', 'warning');
+            return;
+        }
+
+        try {
+            transactionLoading = true;
+            const response = await fetch(`${BLOCKCHAIN_API}/transaction`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(transactionForm)
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                showNotification(data.message, 'success');
+                showTransactionModal = false;
+                
+                // Reset form
+                transactionForm = {
+                    fromAccount: selectedAccount,
+                    toAccount: '',
+                    amount: '',
+                    reason: 'torrent_seeding',
+                    torrentInfo: {
+                        fileName: '',
+                        fileSize: '',
+                        seedingDuration: ''
+                    }
+                };
+                
+                // Refresh accounts and transactions
+                await fetchAccounts();
+                await fetchTransactions();
+            } else {
+                const error = await response.json();
+                showNotification(error.error || 'Transaction failed', 'error');
+            }
+        } catch (error) {
+            console.error('Transaction error:', error);
+            showNotification('Transaction failed', 'error');
+        } finally {
+            transactionLoading = false;
+        }
+    }
+
+    function calculateTorrentReward() {
+        const { fileSize, seedingDuration } = transactionForm.torrentInfo;
+        if (!fileSize || !seedingDuration) return 0;
+        
+        // Simple calculation: base amount + file size bonus + time bonus
+        const baseFee = 0.001; // Base fee in ETH
+        const sizeMB = parseFloat(fileSize) || 0;
+        const duration = parseFloat(seedingDuration) || 0;
+        
+        const sizeBonus = (sizeMB / 1000) * 0.0001; // 0.0001 ETH per GB
+        const timeBonus = duration * 0.0001; // 0.0001 ETH per hour
+        
+        return (baseFee + sizeBonus + timeBonus).toFixed(6);
+    }
+
+    function formatTransactionDate(timestamp) {
+        if (!timestamp) return 'Unknown';
+        const date = new Date(Number(timestamp) * 1000);
+        return date.toLocaleDateString('en-US', {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+    }
+
+    function shortenAddress(address) {
+        if (!address) return '';
+        return `${address.slice(0, 6)}...${address.slice(-4)}`;
+    }
+
+    // Watch for selected account changes
+    $: if (selectedAccount) {
+        transactionForm.fromAccount = selectedAccount;
+        fetchTransactions();
+    }
+
+    // Auto-calculate amount when torrent info changes
+    $: if (transactionForm.torrentInfo.fileSize || transactionForm.torrentInfo.seedingDuration) {
+        const calculatedAmount = calculateTorrentReward();
+        if (calculatedAmount > 0) {
+            transactionForm.amount = calculatedAmount;
+        }
+    }
+
     // Watch for tab changes to load appropriate data
     $: if (activeTab === 'torrents') {
         fetchActiveTorrents();
+    } else if (activeTab === 'blockchain') {
+        fetchAccounts();
+        if (selectedAccount) {
+            fetchTransactions();
+        }
     }
 
     // Initialize
@@ -510,7 +704,7 @@
         <div class="header-content">
             <div class="header-title">
                 <div class="title-section">
-                    <h1 class="main-title">TorrentChain</h1>
+                    <h1 class="main-title">TrueTorrent</h1>
                     <span class="subtitle-badge">Decentralized File Sharing</span>
                 </div>
                 
@@ -1096,19 +1290,38 @@
             </div>
 
         {:else if activeTab === 'blockchain'}
-            <!-- Blockchain Info Section -->
+            <!-- Enhanced Blockchain Info Section -->
             <div class="section-card">
-                <div class="section-header">
-                    <h2 class="section-title">Blockchain Information</h2>
-                    <p class="section-description">Smart contract and blockchain details</p>
+                <div class="section-header with-button">
+                    <div class="header-text">
+                        <h2 class="section-title">Blockchain Information</h2>
+                        <p class="section-description">Smart contract, accounts, and transaction management</p>
+                    </div>
+                    <button 
+                        on:click={() => showTransactionModal = true}
+                        class="primary-button"
+                        disabled={$accounts.length === 0}
+                    >
+                        <Send class="button-icon" size={16} />
+                        Send Payment
+                    </button>
                 </div>
                 
                 <div class="section-content">
+                    <!-- Contract Info -->
                     <div class="info-grid">
                         <div class="info-item">
                             <dt class="info-label">Contract Address</dt>
                             <dd class="info-value contract-address">
                                 {$contractAddress || 'Loading...'}
+                                {#if $contractAddress}
+                                    <button 
+                                        class="copy-button small"
+                                        on:click={() => navigator.clipboard.writeText($contractAddress)}
+                                    >
+                                        <Copy size={14} />
+                                    </button>
+                                {/if}
                             </dd>
                         </div>
                         <div class="info-item">
@@ -1120,6 +1333,131 @@
                             </dd>
                         </div>
                     </div>
+
+                    <!-- Account Selection -->
+                    {#if $accounts.length > 0}
+                        <div class="account-section">
+                            <h3 class="subsection-title">
+                                <Wallet class="title-icon" size={20} />
+                                Your Accounts
+                            </h3>
+                            <div class="account-selector">
+                                <select bind:value={selectedAccount} class="account-select">
+                                    {#each $accounts as account}
+                                        <option value={account.address}>
+                                            {shortenAddress(account.address)} - {parseFloat(account.balance).toFixed(4)} ETH
+                                        </option>
+                                    {/each}
+                                </select>
+                                <button 
+                                    on:click={fetchAccounts}
+                                    class="secondary-button"
+                                >
+                                    <RefreshCw class="button-icon" size={16} />
+                                    Refresh
+                                </button>
+                            </div>
+                            
+                            {#if selectedAccount}
+                                <div class="selected-account-info">
+                                    <div class="account-card">
+                                        <div class="account-header">
+                                            <h4 class="account-title">Selected Account</h4>
+                                            <span class="account-balance">
+                                                {$accounts.find(acc => acc.address === selectedAccount)?.balance || '0'} ETH
+                                            </span>
+                                        </div>
+                                        <div class="account-address">
+                                            <code>{selectedAccount}</code>
+                                            <button 
+                                                class="copy-button small"
+                                                on:click={() => navigator.clipboard.writeText(selectedAccount)}
+                                            >
+                                                <Copy size={14} />
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            {/if}
+                        </div>
+
+                        <!-- Transaction History -->
+                        <div class="transactions-section">
+                            <h3 class="subsection-title">
+                                <Clock class="title-icon" size={20} />
+                                Recent Transactions
+                            </h3>
+                            
+                            {#if $transactions.length === 0}
+                                <div class="empty-transactions">
+                                    <TrendingUp class="empty-icon" size={48} />
+                                    <p class="empty-text">No transactions yet</p>
+                                    <p class="empty-subtext">Send your first payment for torrent seeding rewards</p>
+                                </div>
+                            {:else}
+                                <div class="transactions-list">
+                                    {#each $transactions as tx}
+                                        <div class="transaction-card">
+                                            <div class="transaction-header">
+                                                <div class="transaction-type">
+                                                    {#if tx.from.toLowerCase() === selectedAccount.toLowerCase()}
+                                                        <div class="tx-direction sent">
+                                                            <ArrowUp class="direction-icon" size={16} />
+                                                            Sent
+                                                        </div>
+                                                    {:else}
+                                                        <div class="tx-direction received">
+                                                            <ArrowDown class="direction-icon" size={16} />
+                                                            Received
+                                                        </div>
+                                                    {/if}
+                                                </div>
+                                                <div class="transaction-amount">
+                                                    {parseFloat(tx.value).toFixed(6)} ETH
+                                                </div>
+                                            </div>
+                                            <div class="transaction-details">
+                                                <div class="transaction-addresses">
+                                                    <div class="address-item">
+                                                        <span class="address-label">From:</span>
+                                                        <code class="address-value">{shortenAddress(tx.from)}</code>
+                                                    </div>
+                                                    <div class="address-item">
+                                                        <span class="address-label">To:</span>
+                                                        <code class="address-value">{shortenAddress(tx.to)}</code>
+                                                    </div>
+                                                </div>
+                                                <div class="transaction-meta">
+                                                    <span class="tx-date">{formatTransactionDate(tx.timestamp)}</span>
+                                                    <button 
+                                                        class="tx-hash-button"
+                                                        on:click={() => navigator.clipboard.writeText(tx.hash)}
+                                                        title="Copy transaction hash"
+                                                    >
+                                                        <Copy size={12} />
+                                                        {shortenAddress(tx.hash)}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    {/each}
+                                </div>
+                            {/if}
+                        </div>
+                    {:else}
+                        <div class="empty-state">
+                            <Wallet class="empty-icon" size={48} />
+                            <h3 class="empty-title">No accounts available</h3>
+                            <p class="empty-description">Make sure Ganache is running and connected.</p>
+                            <button 
+                                on:click={fetchAccounts}
+                                class="primary-button"
+                            >
+                                <RefreshCw class="button-icon" size={16} />
+                                Try Again
+                            </button>
+                        </div>
+                    {/if}
                 </div>
             </div>
         {/if}
@@ -1360,6 +1698,161 @@
                     >
                         <Edit class="button-icon" size={16} />
                         Edit
+                    </button>
+                </div>
+            </div>
+        </div>
+    {/if}
+
+    <!-- Send Transaction Modal -->
+    {#if showTransactionModal}
+        <div class="modal-overlay">
+            <div class="modal-content large">
+                <div class="modal-header">
+                    <h3 class="modal-title">Send Payment for Torrent Seeding</h3>
+                    <button 
+                        on:click={() => showTransactionModal = false}
+                        class="modal-close"
+                    >
+                        <X class="close-icon" size={20} />
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <div class="transaction-form">
+                        <div class="form-section">
+                            <h4 class="form-section-title">Transaction Details</h4>
+                            
+                            <div class="form-group">
+                                <label for="from-account" class="form-label">From Account</label>
+                                <select 
+                                    id="from-account"
+                                    bind:value={transactionForm.fromAccount}
+                                    class="form-select"
+                                    disabled={transactionLoading}
+                                >
+                                    {#each $accounts as account}
+                                        <option value={account.address}>
+                                            {shortenAddress(account.address)} - {parseFloat(account.balance).toFixed(4)} ETH
+                                        </option>
+                                    {/each}
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="to-account" class="form-label">To Account (Seeder)</label>
+                                <select 
+                                    id="to-account"
+                                    bind:value={transactionForm.toAccount}
+                                    class="form-select"
+                                    disabled={transactionLoading}
+                                >
+                                    <option value="">Select recipient account...</option>
+                                    {#each $accounts as account}
+                                        {#if account.address !== transactionForm.fromAccount}
+                                            <option value={account.address}>
+                                                {shortenAddress(account.address)} - {parseFloat(account.balance).toFixed(4)} ETH
+                                            </option>
+                                        {/if}
+                                    {/each}
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="tx-amount" class="form-label">Amount (ETH)</label>
+                                <input 
+                                    id="tx-amount"
+                                    type="number"
+                                    step="0.000001"
+                                    min="0"
+                                    bind:value={transactionForm.amount}
+                                    class="form-input"
+                                    placeholder="0.001"
+                                    disabled={transactionLoading}
+                                >
+                            </div>
+                        </div>
+
+                        <div class="form-section">
+                            <h4 class="form-section-title">Torrent Information</h4>
+                            
+                            <div class="form-group">
+                                <label for="file-name" class="form-label">File Name</label>
+                                <input 
+                                    id="file-name"
+                                    type="text"
+                                    bind:value={transactionForm.torrentInfo.fileName}
+                                    class="form-input"
+                                    placeholder="example.zip"
+                                    disabled={transactionLoading}
+                                >
+                            </div>
+
+                            <div class="form-group">
+                                <label for="file-size" class="form-label">File Size (MB)</label>
+                                <input 
+                                    id="file-size"
+                                    type="number"
+                                    min="0"
+                                    bind:value={transactionForm.torrentInfo.fileSize}
+                                    class="form-input"
+                                    placeholder="100"
+                                    disabled={transactionLoading}
+                                >
+                            </div>
+
+                            <div class="form-group">
+                                <label for="seeding-duration" class="form-label">Seeding Duration (hours)</label>
+                                <input 
+                                    id="seeding-duration"
+                                    type="number"
+                                    min="0"
+                                    bind:value={transactionForm.torrentInfo.seedingDuration}
+                                    class="form-input"
+                                    placeholder="24"
+                                    disabled={transactionLoading}
+                                >
+                            </div>
+
+                            <div class="reward-calculation">
+                                <div class="calculation-info">
+                                    <h5 class="calculation-title">Calculated Reward</h5>
+                                    <p class="calculation-amount">{calculateTorrentReward()} ETH</p>
+                                    <p class="calculation-note">
+                                        Based on file size and seeding duration
+                                    </p>
+                                </div>
+                                <button 
+                                    type="button"
+                                    on:click={() => transactionForm.amount = calculateTorrentReward()}
+                                    class="use-calculation-button"
+                                    disabled={transactionLoading}
+                                >
+                                    Use Calculated Amount
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-actions">
+                    <button 
+                        on:click={sendTransaction}
+                        disabled={transactionLoading || !transactionForm.fromAccount || !transactionForm.toAccount || !transactionForm.amount}
+                        class="primary-button {transactionLoading ? 'loading' : ''}"
+                    >
+                        {#if transactionLoading}
+                            <Loader2 class="loading-spinner" size={16} />
+                            Sending...
+                        {:else}
+                            <Send class="button-icon" size={16} />
+                            Send Payment
+                        {/if}
+                    </button>
+                    <button 
+                        on:click={() => showTransactionModal = false}
+                        class="secondary-button"
+                        disabled={transactionLoading}
+                    >
+                        Cancel
                     </button>
                 </div>
             </div>
